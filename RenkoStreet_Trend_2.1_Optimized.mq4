@@ -3,13 +3,12 @@
 //|                                   Copyright@ 2020,TradingMT4.Com |
 //|                                       https://www.tradingmt4.com |
 //+------------------------------------------------------------------+
-//| Optimized version - performance improvements:                     |
+//| Optimized version v2                                              |
 //|   1. Converted start() to OnCalculate() with prev_calculated     |
-//|   2. Incremental recalculation: only ~50 bars per tick instead   |
-//|      of entire history (0.67 decay = negligible after 50 bars)   |
-//|   3. Full history only on first load or chart change             |
-//|   4. Color assignment limited to recalculated range only         |
-//|   5. All signals, buffers, and visuals preserved exactly         |
+//|   2. Incremental recalculation: only ~50 bars per tick           |
+//|   3. Fixed: timeframe switch now triggers full recalculation     |
+//|   4. Added: customizable Up/Down histogram colours               |
+//|   5. All signals and logic preserved exactly                     |
 //+------------------------------------------------------------------+
 #property copyright "Copyright@ 2020,TradingMT4.Com"
 #property link      "https://www.tradingmt4.com"
@@ -24,16 +23,21 @@
 #property indicator_color2 Lime
 #property indicator_color3 Red
 
-extern int Gi_76 = 13;
+extern int    Gi_76     = 13;
+extern color  UpColor   = clrLime;
+extern color  DownColor = clrRed;
 
 double G_ibuf_80[];
 double G_ibuf_84[];
 double G_ibuf_88[];
 
-// Convergence depth: number of bars to recalculate on each tick.
-// With 0.67 decay, 50 bars gives error < 1e-9 — effectively zero.
-// Increase if you use a very large Gi_76 value.
+// Convergence depth: with 0.67 decay, 50 bars gives error < 1e-9.
 #define RECALC_DEPTH 50
+
+// Track whether a full calculation has been completed since last init.
+static bool g_fullCalcDone = false;
+// Track bar count to detect data loading / timeframe changes.
+static int  g_lastBars = 0;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -41,11 +45,22 @@ int OnInit()
    SetIndexStyle(0, DRAW_NONE);
    SetIndexStyle(1, DRAW_HISTOGRAM, STYLE_SOLID, 4);
    SetIndexStyle(2, DRAW_HISTOGRAM, STYLE_SOLID, 4);
-   IndicatorDigits(Digits + 1);
    SetIndexBuffer(0, G_ibuf_80);
    SetIndexBuffer(1, G_ibuf_84);
    SetIndexBuffer(2, G_ibuf_88);
+   SetIndexLabel(1, "Up");
+   SetIndexLabel(2, "Down");
+   IndicatorDigits(Digits + 1);
    IndicatorShortName(WindowExpertName() + " (" + IntegerToString(Gi_76) + ")");
+
+   // Apply user-chosen colours
+   SetIndexStyle(1, DRAW_HISTOGRAM, STYLE_SOLID, 4, UpColor);
+   SetIndexStyle(2, DRAW_HISTOGRAM, STYLE_SOLID, 4, DownColor);
+
+   // Force full recalculation on next OnCalculate call
+   g_fullCalcDone = false;
+   g_lastBars     = 0;
+
    return(INIT_SUCCEEDED);
   }
 
@@ -62,20 +77,32 @@ int OnCalculate(const int rates_total,
                 const int &spread[])
   {
    int bars = Bars;
+
+   // Not enough data yet — return 0 so MT4 retries with prev_calculated=0
    if(bars < Gi_76 + 1)
-      return(rates_total);
+      return(0);
 
-   //--- Determine recalculation range
+   //--- Determine whether we need a full recalculation
+   bool needFullCalc = false;
+
+   if(!g_fullCalcDone)
+      needFullCalc = true;                    // Never completed a full calc since init
+   else if(prev_calculated == 0)
+      needFullCalc = true;                    // MT4 is asking for full recalc
+   else if(bars > g_lastBars + RECALC_DEPTH)
+      needFullCalc = true;                    // Many new bars loaded (e.g. data backfill)
+
+   g_lastBars = bars;
+
+   //--- Set recalculation range
    int limit;
-   if(prev_calculated == 0)
-      limit = bars - 1;                              // First run: full history
+   if(needFullCalc)
+      limit = bars - 1;                       // Full history
    else
-      limit = MathMin(RECALC_DEPTH, bars - 1);       // Subsequent ticks: convergence depth only
+      limit = MathMin(RECALC_DEPTH, bars - 1); // Incremental: convergence depth only
 
-   //--- Phase 1: Fisher Transform (from bar 0 outward to limit)
-   //    Recursive chain: Ld_36 carries forward, decays by 0.67 per bar.
-   //    After RECALC_DEPTH bars the starting seed has no practical effect,
-   //    so cached values beyond that range remain valid.
+   //--- Phase 1: Fisher Transform (bar 0 → limit)
+   //    Recursive chain with 0.67 decay per bar.
    double Ld_28 = 0.0;
    double Ld_36 = 0.0;
    double Ld_60 = 0.0;
@@ -103,15 +130,12 @@ int OnCalculate(const int rates_total,
       Ld_60 = G_ibuf_80[i];
      }
 
-   //--- Phase 2: Colour assignment (only for the recalculated range)
-   //    Determine trend state at the boundary from cached buffers,
-   //    then walk inward assigning Lime / Red histograms.
+   //--- Phase 2: Colour assignment (recalculated range only)
    bool trend_up = true;
 
    // Seed trend state from the bar just past our recalculated range
    if(limit < bars - 1)
      {
-      // Use the cached colour buffer to recover the trend state
       if(G_ibuf_88[limit + 1] == 1.0)
          trend_up = false;
       else
@@ -141,6 +165,7 @@ int OnCalculate(const int rates_total,
         }
      }
 
+   g_fullCalcDone = true;
    return(rates_total);
   }
 //+------------------------------------------------------------------+
