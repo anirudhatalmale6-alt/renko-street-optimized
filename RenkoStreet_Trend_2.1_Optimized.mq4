@@ -3,12 +3,14 @@
 //|                                   Copyright@ 2020,TradingMT4.Com |
 //|                                       https://www.tradingmt4.com |
 //+------------------------------------------------------------------+
-//| Optimized version v2                                              |
+//| Optimized version v3                                              |
 //|   1. Converted start() to OnCalculate() with prev_calculated     |
 //|   2. Incremental recalculation: only ~50 bars per tick           |
-//|   3. Fixed: timeframe switch now triggers full recalculation     |
-//|   4. Added: customizable Up/Down histogram colours               |
-//|   5. All signals and logic preserved exactly                     |
+//|   3. Fixed: timeframe switch triggers full recalculation         |
+//|   4. Fixed: works with any Gi_76 value including 10000+         |
+//|   5. Lazy sliding max/min tracking for faster full calculation   |
+//|   6. Customizable Up/Down histogram colours                      |
+//|   7. All signals and logic preserved exactly                     |
 //+------------------------------------------------------------------+
 #property copyright "Copyright@ 2020,TradingMT4.Com"
 #property link      "https://www.tradingmt4.com"
@@ -78,8 +80,8 @@ int OnCalculate(const int rates_total,
   {
    int bars = Bars;
 
-   // Not enough data yet — return 0 so MT4 retries with prev_calculated=0
-   if(bars < Gi_76 + 1)
+   // Need at least 2 bars for any meaningful calculation
+   if(bars < 2)
       return(0);
 
    //--- Determine whether we need a full recalculation
@@ -103,16 +105,62 @@ int OnCalculate(const int rates_total,
 
    //--- Phase 1: Fisher Transform (bar 0 → limit)
    //    Recursive chain with 0.67 decay per bar.
+   //    Uses lazy max/min tracking: only rescans the full window when
+   //    the previous max/min drops out. Significant speedup for large Gi_76.
    double Ld_28 = 0.0;
    double Ld_36 = 0.0;
    double Ld_60 = 0.0;
    double high_val, low_val, mid;
 
+   int maxPos = -1;   // index of current window's highest high
+   int minPos = -1;   // index of current window's lowest low
+
    for(int i = 0; i <= limit; i++)
      {
-      high_val = High[iHighest(NULL, 0, MODE_HIGH, Gi_76, i)];
-      low_val  = Low[iLowest(NULL, 0, MODE_LOW, Gi_76, i)];
-      mid      = (High[i] + Low[i]) / 2.0;
+      // Window is [i, i + Gi_76 - 1], clamped to available bars.
+      int windowEnd = i + Gi_76 - 1;
+      if(windowEnd >= bars)
+         windowEnd = bars - 1;
+
+      //--- Lazy highest-high tracking
+      if(maxPos < i)
+        {
+         // Previous max dropped out of window — full rescan
+         maxPos = iHighest(NULL, 0, MODE_HIGH, windowEnd - i + 1, i);
+        }
+      else if(i > 0 && windowEnd < bars - 1)
+        {
+         // Window slid by 1: bar (i-1) dropped out, bar windowEnd is new.
+         // Only need to check the new bar against the current max.
+         if(windowEnd == i + Gi_76 - 1 && High[windowEnd] >= High[maxPos])
+            maxPos = windowEnd;
+         // If current max is still in window, it's still valid.
+        }
+      else
+        {
+         maxPos = iHighest(NULL, 0, MODE_HIGH, windowEnd - i + 1, i);
+        }
+      high_val = High[maxPos];
+
+      //--- Lazy lowest-low tracking
+      if(minPos < i)
+        {
+         // Previous min dropped out of window — full rescan
+         minPos = iLowest(NULL, 0, MODE_LOW, windowEnd - i + 1, i);
+        }
+      else if(i > 0 && windowEnd < bars - 1)
+        {
+         if(windowEnd == i + Gi_76 - 1 && Low[windowEnd] <= Low[minPos])
+            minPos = windowEnd;
+        }
+      else
+        {
+         minPos = iLowest(NULL, 0, MODE_LOW, windowEnd - i + 1, i);
+        }
+      low_val = Low[minPos];
+
+      //--- Fisher Transform core (identical to original)
+      mid = (High[i] + Low[i]) / 2.0;
 
       if(high_val - low_val == 0.0)
          Ld_28 = 0.67 * Ld_36 + (-0.33);
